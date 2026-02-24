@@ -7,7 +7,7 @@ RUN go mod download
 
 COPY . .
 
-RUN go build -o manager ./cmd/manager
+RUN go build -o manager ./cmd/Manager
 
 FROM alpine:latest
 
