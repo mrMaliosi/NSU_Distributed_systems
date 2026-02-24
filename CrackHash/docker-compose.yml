@@ -1,0 +1,20 @@
+version: "3.9"
+
+services:
+  manager:
+    build: .
+    container_name: crackhash-manager
+    ports:
+      - "57107:57107"
+    environment:
+      - ENV=production
+    command: ./manager
+    depends_on:
+      - worker
+
+  worker:
+    build: .
+    container_name: crackhash-worker
+    environment:
+      - ENV=production
+    command: ./worker

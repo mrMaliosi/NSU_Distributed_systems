@@ -1,8 +1,11 @@
-package http
+package handler
 
 import (
 	"encoding/json"
 	"net/http"
+
+	"CrackHash/internal/api/http/dto"
+	"CrackHash/internal/metrics"
 )
 
 type MetricsProvider interface {
@@ -17,10 +20,10 @@ func NewMetricsHandler(service MetricsProvider) *MetricsHandler {
 	return &MetricsHandler{service: service}
 }
 
-func (h *MetricsHandler) Handle(w http.ResponseWriter, r *http.Request) {
+func (h *MetricsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	snapshot := h.service.GetMetrics()
 
-	resp := MetricsResponse{
+	resp := dto.MetricsResponse{
 		TotalTasks:       snapshot.TotalTasks,
 		ActiveTasks:      snapshot.ActiveTasks,
 		CompletedTasks:   snapshot.CompletedTasks,

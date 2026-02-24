@@ -1,9 +1,11 @@
 package repository
 
+import "CrackHash/internal/domain"
+
 type TaskRepository interface {
-	Save(task *Task) error
-	GetByID(id string) (*Task, error)
-	GetBySignature(signature string) (*Task, error)
-	Update(task *Task) error
-	List() ([]*Task, error)
+	Save(task *domain.Task) error
+	GetByID(id string) (*domain.Task, error)
+	GetBySignature(signature string) (*domain.Task, error)
+	Update(task *domain.Task) error
+	List() ([]*domain.Task, error)
 }
