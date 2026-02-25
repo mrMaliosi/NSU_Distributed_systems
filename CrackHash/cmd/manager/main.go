@@ -1,4 +1,4 @@
-package manager
+package main
 
 import (
 	"log"
@@ -16,7 +16,6 @@ import (
 func main() {
 	repo := repository.NewMemoryRepository()
 
-	// Список URL воркеров можно задать через WORKER_URLS (через запятую)
 	workerURLsEnv := os.Getenv("WORKER_URLS")
 	var workerURLs []string
 	if workerURLsEnv != "" {
@@ -28,8 +27,6 @@ func main() {
 		}
 	}
 
-	// Либо можно указать количество воркеров через WORKERS_COUNT.
-	// В этом случае используются доменные имена сервиса docker-compose `worker`.
 	if len(workerURLs) == 0 {
 		if cntStr := os.Getenv("WORKERS_COUNT"); cntStr != "" {
 			if cnt, err := strconv.Atoi(cntStr); err == nil && cnt > 0 {
@@ -43,7 +40,6 @@ func main() {
 	}
 
 	if len(workerURLs) == 0 {
-		// Значение по умолчанию для docker-compose
 		workerURLs = []string{"http://worker:57107"}
 	}
 

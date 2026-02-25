@@ -1,4 +1,4 @@
-package worker
+package main
 
 import (
 	"log"
@@ -11,7 +11,6 @@ import (
 )
 
 func main() {
-	// URL менеджера можно задать через MANAGER_URL, по умолчанию — имя сервиса из docker-compose
 	managerURL := os.Getenv("MANAGER_URL")
 	if managerURL == "" {
 		managerURL = "http://manager:57107"

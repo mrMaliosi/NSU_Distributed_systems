@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"CrackHash/internal/api/http/dto"
+	"CrackHash/internal/domain"
 	"CrackHash/internal/service"
 )
 
@@ -28,7 +29,7 @@ func (h *ManagerHandler) HandleCrack(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		task, est, err := h.taskService.CreateTask(
+		task, est, existed, err := h.taskService.CreateTask(
 			req.Hash,
 			req.MaxLength,
 			req.Algorithm,
@@ -38,6 +39,21 @@ func (h *ManagerHandler) HandleCrack(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+
+		// Если задача уже существовала и она в статусе READY — сразу возвращаем готовый результат
+		if existed && task.Status == domain.StatusReady {
+			resp := dto.StatusResponse{
+				Status: task.Status,
+				Data:   task.Result,
+				Error:  task.Error,
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		// В остальных случаях (новая задача или IN_PROGRESS) — обычный ответ с requestId и estimatedCombinations
 
 		resp := dto.CrackResponse{
 			RequestID:             task.ID,
@@ -79,9 +95,14 @@ func (h *ManagerHandler) HandleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var data []string
+	if task.Status == domain.StatusReady {
+		data = task.Result
+	}
+
 	resp := dto.StatusResponse{
 		Status: task.Status,
-		Data:   task.Result,
+		Data:   data,
 		Error:  task.Error,
 	}
 

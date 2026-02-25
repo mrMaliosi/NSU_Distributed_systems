@@ -55,13 +55,18 @@ func (s *TaskService) CreateTask(
 	maxLength int,
 	algorithm string,
 	alphabet string,
-) (*domain.Task, uint64, error) {
+) (*domain.Task, uint64, bool, error) {
 
 	signature := generateSignature(hash, algorithm, alphabet, maxLength)
+	estimated := estimateCombinations(alphabet, maxLength)
 
+	// Проверяем, нет ли уже задачи с такими параметрами
 	existing, err := s.repo.GetBySignature(signature)
-	if err == nil {
-		return existing, estimateCombinations(alphabet, maxLength), nil
+	if err == nil && existing != nil {
+		// Если задача уже есть и не была отменена — просто возвращаем её.
+		if existing.Status != domain.StatusCancelled {
+			return existing, estimated, true, nil
+		}
 	}
 
 	splitter := NewSplitterService(alphabet, maxLength, 10*time.Second, 0)
@@ -83,16 +88,14 @@ func (s *TaskService) CreateTask(
 
 	err = s.repo.Save(task)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 
-	// Асинхронно распределяем части задачи по воркерам
 	go s.dispatchTaskParts(task, int(partCount))
 
-	return task, partCount, nil
+	return task, estimated, false, nil
 }
 
-// dispatchTaskParts разбивает задачу на части и отправляет их воркерам.
 func (s *TaskService) dispatchTaskParts(task *domain.Task, partCount int) {
 	if len(s.workerEndpoints) == 0 || partCount <= 0 {
 		return
@@ -182,7 +185,8 @@ func (s *TaskService) GetMetrics() metrics.Snapshot {
 	total := len(tasks)
 	active := 0
 	completed := 0
-	var totalTime float64
+	var totalSpeed float64
+	speedSamples := 0
 
 	for _, t := range tasks {
 		switch t.Status {
@@ -190,15 +194,21 @@ func (s *TaskService) GetMetrics() metrics.Snapshot {
 			active++
 		case domain.StatusReady:
 			completed++
-			if t.FinishedAt != nil {
-				totalTime += t.FinishedAt.Sub(t.CreatedAt).Seconds()
+			// Средняя скорость по задаче = checkedWords / (totalExecTimeSec)
+			if t.TotalExecTimeMs > 0 && t.CheckedWords > 0 {
+				seconds := float64(t.TotalExecTimeMs) / 1000.0
+				if seconds > 0 {
+					speed := float64(t.CheckedWords) / seconds
+					totalSpeed += speed
+					speedSamples++
+				}
 			}
 		}
 	}
 
 	var avg float64
-	if completed > 0 {
-		avg = totalTime / float64(completed)
+	if speedSamples > 0 {
+		avg = totalSpeed / float64(speedSamples)
 	}
 
 	return metrics.Snapshot{
@@ -232,11 +242,22 @@ func (s *TaskService) AcceptWorkerResult(
 	// Если воркер вернул ошибку
 	if workerErr != "" {
 		task.FailedParts = append(task.FailedParts, partNumber)
+		// Переводим задачу в статус ошибки и сохраняем текст
+		task.Status = domain.StatusError
+		task.Error = workerErr
+		now := time.Now()
+		task.FinishedAt = &now
 		return s.repo.Update(task)
 	}
 
 	// Добавляем найденные слова
 	task.Result = append(task.Result, words...)
+
+	// Обновляем метрики: сколько слов проверено и сколько времени заняло
+	task.CheckedWords += checked
+	if execTime > 0 {
+		task.TotalExecTimeMs += uint64(execTime)
+	}
 
 	// Увеличиваем счётчик обработанных частей
 	task.CompletedParts++
