@@ -1,24 +1,34 @@
 package service
 
 import (
+	"bytes"
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
+	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/google/uuid"
 
+	"CrackHash/internal/api/http/dto"
 	"CrackHash/internal/domain"
 	"CrackHash/internal/metrics"
 	"CrackHash/internal/repository"
 )
 
 type TaskService struct {
-	repo repository.TaskRepository
+	repo            repository.TaskRepository
+	workerEndpoints []string
+	httpClient      *http.Client
 }
 
-func NewTaskService(repo repository.TaskRepository) *TaskService {
-	return &TaskService{repo: repo}
+func NewTaskService(repo repository.TaskRepository, workerEndpoints []string) *TaskService {
+	return &TaskService{
+		repo:            repo,
+		workerEndpoints: workerEndpoints,
+		httpClient:      &http.Client{Timeout: 10 * time.Second},
+	}
 }
 
 func generateSignature(hash, algo, alphabet string, maxLen int) string {
@@ -49,21 +59,26 @@ func (s *TaskService) CreateTask(
 
 	signature := generateSignature(hash, algorithm, alphabet, maxLength)
 
-	// Проверяем существующую
 	existing, err := s.repo.GetBySignature(signature)
 	if err == nil {
 		return existing, estimateCombinations(alphabet, maxLength), nil
 	}
 
+	splitter := NewSplitterService(alphabet, maxLength, 10*time.Second, 0)
+	partCount := splitter.PartCount()
+
 	task := &domain.Task{
-		ID:        uuid.New().String(),
-		Hash:      hash,
-		MaxLength: maxLength,
-		Algorithm: algorithm,
-		Alphabet:  alphabet,
-		Signature: signature,
-		Status:    domain.StatusInProgress,
-		CreatedAt: time.Now(),
+		ID:             uuid.New().String(),
+		Hash:           hash,
+		MaxLength:      maxLength,
+		Algorithm:      algorithm,
+		Alphabet:       alphabet,
+		Signature:      signature,
+		Status:         domain.StatusInProgress,
+		Result:         []string{},
+		TotalParts:     partCount,
+		CompletedParts: 0,
+		CreatedAt:      time.Now(),
 	}
 
 	err = s.repo.Save(task)
@@ -71,10 +86,64 @@ func (s *TaskService) CreateTask(
 		return nil, 0, err
 	}
 
-	// Пока симуляция
-	go s.simulateExecution(task.ID)
+	// Асинхронно распределяем части задачи по воркерам
+	go s.dispatchTaskParts(task, int(partCount))
 
-	return task, estimateCombinations(alphabet, maxLength), nil
+	return task, partCount, nil
+}
+
+// dispatchTaskParts разбивает задачу на части и отправляет их воркерам.
+func (s *TaskService) dispatchTaskParts(task *domain.Task, partCount int) {
+	if len(s.workerEndpoints) == 0 || partCount <= 0 {
+		return
+	}
+
+	for partNumber := 0; partNumber < partCount; partNumber++ {
+		workerURL := s.workerEndpoints[partNumber%len(s.workerEndpoints)]
+
+		payload := dto.WorkerTaskRequest{
+			RequestId:  task.ID,
+			Hash:       task.Hash,
+			PartNumber: partNumber,
+			PartCount:  partCount,
+			Algorithm:  task.Algorithm,
+			Alphabet:   task.Alphabet,
+		}
+
+		go s.sendWorkerTask(workerURL, payload)
+	}
+}
+
+// sendWorkerTask отправляет одну часть задачи конкретному воркеру.
+func (s *TaskService) sendWorkerTask(workerURL string, payload dto.WorkerTaskRequest) {
+	if workerURL == "" {
+		return
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+
+	url := workerURL + "/internal/api/worker/hash/crack/task"
+
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(body))
+	if err != nil {
+		return
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	client := s.httpClient
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
 }
 
 func (s *TaskService) simulateExecution(taskID string) {
@@ -138,4 +207,46 @@ func (s *TaskService) GetMetrics() metrics.Snapshot {
 		CompletedTasks:   completed,
 		AvgExecutionTime: avg,
 	}
+}
+
+func (s *TaskService) AcceptWorkerResult(
+	requestID string,
+	partNumber int,
+	words []string,
+	checked uint64,
+	execTime int64,
+	workerErr string,
+) error {
+
+	task, err := s.repo.GetByID(requestID)
+	if err != nil {
+		return err
+	}
+
+	// Если задача уже завершена или отменена — игнорируем
+	if task.Status == domain.StatusReady ||
+		task.Status == domain.StatusCancelled {
+		return nil
+	}
+
+	// Если воркер вернул ошибку
+	if workerErr != "" {
+		task.FailedParts = append(task.FailedParts, partNumber)
+		return s.repo.Update(task)
+	}
+
+	// Добавляем найденные слова
+	task.Result = append(task.Result, words...)
+
+	// Увеличиваем счётчик обработанных частей
+	task.CompletedParts++
+
+	// Если все части выполнены — завершаем задачу
+	if task.CompletedParts >= task.TotalParts {
+		task.Status = domain.StatusReady
+		now := time.Now()
+		task.FinishedAt = &now
+	}
+
+	return s.repo.Update(task)
 }

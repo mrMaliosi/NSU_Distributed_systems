@@ -1,22 +1,24 @@
-FROM golang:1.23.1-alpine AS builder
+FROM golang:1.23.1 AS builder
 
 WORKDIR /app
 
-COPY go.mod go.sum ./
+COPY go.mod ./
+COPY go.sum ./
 RUN go mod download
-
 COPY . .
 
-RUN go build -o manager ./cmd/Manager
+RUN CGO_ENABLED=0 go build -o manager-exe ./cmd/manager/main.go
+RUN CGO_ENABLED=0 go build -o worker-exe ./cmd/worker/main.go
+
 
 FROM alpine:latest
 
-RUN apk --no-cache add ca-certificates
+WORKDIR /app/
 
-COPY --from=builder /app/manager /manager
+# Копируем оба бинарника в /app
+COPY --from=builder /app/manager-exe /app/
+COPY --from=builder /app/worker-exe /app/
 
-WORKDIR /
+RUN chmod +x /app/manager-exe /app/worker-exe
 
 EXPOSE 57107
-
-ENTRYPOINT ["./manager"]

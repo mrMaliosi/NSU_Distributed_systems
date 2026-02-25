@@ -1,20 +1,19 @@
-version: "3.9"
-
 services:
   manager:
     build: .
-    container_name: crackhash-manager
+    command: ["./manager-exe"]
     ports:
       - "57107:57107"
     environment:
       - ENV=production
-    command: ./manager
+      - WORKERS_COUNT=1
     depends_on:
       - worker
 
   worker:
     build: .
-    container_name: crackhash-worker
+    command: ["./worker-exe"]
     environment:
       - ENV=production
-    command: ./worker
+      - MANAGER_URL=http://manager:57107
+      - PORT=57107

@@ -27,3 +27,21 @@ type MetricsResponse struct {
 	CompletedTasks   int     `json:"completedTasks"`
 	AvgExecutionTime float64 `json:"avgExecutionTime"`
 }
+
+type WorkerTaskRequest struct {
+	RequestId  string `json:"requestId"`
+	Hash       string `json:"hash"`
+	PartNumber int    `json:"partNumber"`
+	PartCount  int    `json:"partCount"`
+	Algorithm  string `json:"algorithm"`
+	Alphabet   string `json:"alphabet"`
+}
+
+type WorkerResultResponse struct {
+	RequestId     string   `json:"requestId"`
+	PartNumber    int      `json:"partNumber"`
+	WordsList     []string `json:"wordsList"`
+	WordsNum      uint64   `json:"wordsNum"`
+	ExecutionTime int64    `json:"workingTime"`
+	Error         string   `json:"error,omitempty"`
+}
