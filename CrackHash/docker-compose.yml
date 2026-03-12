@@ -7,6 +7,8 @@ services:
     environment:
       - ENV=production
       - WORKERS_COUNT=1
+      # Таймаут HTTP-запросов к воркерам (в секундах)
+      - WORKER_TIMEOUT_SECONDS=1
     depends_on:
       - worker
 

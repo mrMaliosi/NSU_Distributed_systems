@@ -31,6 +31,7 @@ func (s *WorkerService) ProcessTask(req dto.WorkerTaskRequest) {
 		req.Hash,
 		req.Algorithm,
 		req.Alphabet,
+		req.MaxLength,
 		req.PartNumber,
 		req.PartCount,
 	)

@@ -30,23 +30,22 @@ func NewSplitterService(
 	timeout time.Duration,
 	hashRate float64,
 ) *SplitterService {
+	if hashRate <= 0 {
+		hashRate = 1_000_000 // fallback 1M/s
+	}
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
 
-	once.Do(func() {
+	s := &SplitterService{
+		alphabet:  alphabet,
+		maxLength: maxLength,
+		timeout:   timeout,
+		hashRate:  hashRate,
+	}
 
-		if hashRate <= 0 {
-			hashRate = 1_000_000 // fallback 1M/s
-		}
-
-		s := &SplitterService{
-			alphabet:  alphabet,
-			maxLength: maxLength,
-			timeout:   timeout,
-			hashRate:  hashRate,
-		}
-
-		s.partCount = s.calculatePartCount()
-		instance = s
-	})
+	s.partCount = s.calculatePartCount()
+	instance = s
 
 	return instance
 }
@@ -117,7 +116,7 @@ func (s *SplitterService) calculatePartCount() uint64 {
 	N := bigPow(alphabetSize, int64(s.maxLength))
 
 	targetChunkSize := int64(s.hashRate * s.timeout.Seconds())
-	if targetChunkSize <= 0 {
+	if targetChunkSize < 1 {
 		targetChunkSize = 1
 	}
 

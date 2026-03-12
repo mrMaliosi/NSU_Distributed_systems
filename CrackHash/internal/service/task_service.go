@@ -5,6 +5,8 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"math/big"
 	"net/http"
 	"strconv"
 	"time"
@@ -21,13 +23,19 @@ type TaskService struct {
 	repo            repository.TaskRepository
 	workerEndpoints []string
 	httpClient      *http.Client
+	timeout         time.Duration
 }
 
-func NewTaskService(repo repository.TaskRepository, workerEndpoints []string) *TaskService {
+func NewTaskService(repo repository.TaskRepository, workerEndpoints []string, timeout time.Duration) *TaskService {
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+
 	return &TaskService{
 		repo:            repo,
 		workerEndpoints: workerEndpoints,
-		httpClient:      &http.Client{Timeout: 10 * time.Second},
+		httpClient:      &http.Client{Timeout: timeout},
+		timeout:         timeout,
 	}
 }
 
@@ -37,14 +45,18 @@ func generateSignature(hash, algo, alphabet string, maxLen int) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func estimateCombinations(alphabet string, maxLength int) uint64 {
-	var total uint64
-	base := uint64(len(alphabet))
-	var pow uint64 = 1
+func estimateCombinations(alphabet string, maxLength int) *big.Int {
+	if maxLength < 1 || len(alphabet) == 0 {
+		return big.NewInt(0)
+	}
+
+	base := big.NewInt(int64(len(alphabet)))
+	pow := big.NewInt(1)
+	total := big.NewInt(0)
 
 	for i := 1; i <= maxLength; i++ {
-		pow *= base
-		total += pow
+		pow.Mul(pow, base)
+		total.Add(total, pow)
 	}
 
 	return total
@@ -55,21 +67,21 @@ func (s *TaskService) CreateTask(
 	maxLength int,
 	algorithm string,
 	alphabet string,
-) (*domain.Task, uint64, bool, error) {
+) (*domain.Task, *big.Int, bool, error) {
 
-	signature := generateSignature(hash, algorithm, alphabet, maxLength)
 	estimated := estimateCombinations(alphabet, maxLength)
+	signature := generateSignature(hash, algorithm, alphabet, maxLength)
 
 	// Проверяем, нет ли уже задачи с такими параметрами
+	// Если задача уже есть и не была отменена — просто возвращаем её.
 	existing, err := s.repo.GetBySignature(signature)
 	if err == nil && existing != nil {
-		// Если задача уже есть и не была отменена — просто возвращаем её.
 		if existing.Status != domain.StatusCancelled {
 			return existing, estimated, true, nil
 		}
 	}
 
-	splitter := NewSplitterService(alphabet, maxLength, 10*time.Second, 0)
+	splitter := NewSplitterService(alphabet, maxLength, s.timeout, 0)
 	partCount := splitter.PartCount()
 
 	task := &domain.Task{
@@ -88,9 +100,9 @@ func (s *TaskService) CreateTask(
 
 	err = s.repo.Save(task)
 	if err != nil {
-		return nil, 0, false, err
+		return nil, big.NewInt(0), false, err
 	}
-
+	fmt.Println("Accepted task with partCount", partCount)
 	go s.dispatchTaskParts(task, int(partCount))
 
 	return task, estimated, false, nil
@@ -106,6 +118,7 @@ func (s *TaskService) dispatchTaskParts(task *domain.Task, partCount int) {
 
 		payload := dto.WorkerTaskRequest{
 			RequestId:  task.ID,
+			MaxLength:  task.MaxLength,
 			Hash:       task.Hash,
 			PartNumber: partNumber,
 			PartCount:  partCount,
@@ -137,32 +150,11 @@ func (s *TaskService) sendWorkerTask(workerURL string, payload dto.WorkerTaskReq
 
 	req.Header.Set("Content-Type", "application/json")
 
-	client := s.httpClient
-	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
-	}
-
-	resp, err := client.Do(req)
+	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return
 	}
 	resp.Body.Close()
-}
-
-func (s *TaskService) simulateExecution(taskID string) {
-	time.Sleep(5 * time.Second)
-
-	task, err := s.repo.GetByID(taskID)
-	if err != nil {
-		return
-	}
-
-	task.Status = domain.StatusReady
-	now := time.Now()
-	task.FinishedAt = &now
-	task.Result = []string{"abcd"}
-
-	s.repo.Update(task)
 }
 
 func (s *TaskService) GetStatus(id string) (*domain.Task, error) {
@@ -194,14 +186,16 @@ func (s *TaskService) GetMetrics() metrics.Snapshot {
 			active++
 		case domain.StatusReady:
 			completed++
-			// Средняя скорость по задаче = checkedWords / (totalExecTimeSec)
-			if t.TotalExecTimeMs > 0 && t.CheckedWords > 0 {
-				seconds := float64(t.TotalExecTimeMs) / 1000.0
-				if seconds > 0 {
-					speed := float64(t.CheckedWords) / seconds
-					totalSpeed += speed
-					speedSamples++
-				}
+		}
+
+		// Средняя "скорость" задачи (слов в секунду) считаем для всех задач,
+		// у которых уже есть какие‑то измерения, независимо от статуса.
+		if t.TotalExecTimeMs > 0 && t.CheckedWords > 0 {
+			seconds := float64(t.TotalExecTimeMs) / 1000.0
+			if seconds > 0 {
+				speed := float64(t.CheckedWords) / seconds
+				totalSpeed += speed
+				speedSamples++
 			}
 		}
 	}
@@ -227,7 +221,7 @@ func (s *TaskService) AcceptWorkerResult(
 	execTime int64,
 	workerErr string,
 ) error {
-
+	fmt.Println(partNumber, checked, execTime)
 	task, err := s.repo.GetByID(requestID)
 	if err != nil {
 		return err
@@ -242,7 +236,6 @@ func (s *TaskService) AcceptWorkerResult(
 	// Если воркер вернул ошибку
 	if workerErr != "" {
 		task.FailedParts = append(task.FailedParts, partNumber)
-		// Переводим задачу в статус ошибки и сохраняем текст
 		task.Status = domain.StatusError
 		task.Error = workerErr
 		now := time.Now()
@@ -258,11 +251,7 @@ func (s *TaskService) AcceptWorkerResult(
 	if execTime > 0 {
 		task.TotalExecTimeMs += uint64(execTime)
 	}
-
-	// Увеличиваем счётчик обработанных частей
 	task.CompletedParts++
-
-	// Если все части выполнены — завершаем задачу
 	if task.CompletedParts >= task.TotalParts {
 		task.Status = domain.StatusReady
 		now := time.Now()

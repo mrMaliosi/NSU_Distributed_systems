@@ -6,7 +6,7 @@ import (
 
 type CrackResponse struct {
 	RequestID             string `json:"requestId"`
-	EstimatedCombinations uint64 `json:"estimatedCombinations"`
+	EstimatedCombinations string `json:"estimatedCombinations"`
 }
 type CrackRequest struct {
 	Hash      string `json:"hash"`
@@ -31,6 +31,7 @@ type MetricsResponse struct {
 type WorkerTaskRequest struct {
 	RequestId  string `json:"requestId"`
 	Hash       string `json:"hash"`
+	MaxLength  int    `json:"maxLength"`
 	PartNumber int    `json:"partNumber"`
 	PartCount  int    `json:"partCount"`
 	Algorithm  string `json:"algorithm"`

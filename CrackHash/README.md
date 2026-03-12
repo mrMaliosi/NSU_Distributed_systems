@@ -22,13 +22,13 @@
 1. Собрать образы:
 
 ```bash
-docker-compose build
+docker compose build
 ```
 
 2. Запустить менеджер и одного воркера:
 
 ```bash
-docker-compose up
+docker compose up
 ```
 
 По умолчанию:
@@ -132,7 +132,7 @@ curl -X POST http://localhost:57107/api/hash/crack \
 ```json
 {
   "requestId": "UUID-задачи",
-  "estimatedCombinations": 456976
+  "estimatedCombinations": 475254
 }
 ```
 

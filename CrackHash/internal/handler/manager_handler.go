@@ -57,7 +57,7 @@ func (h *ManagerHandler) HandleCrack(w http.ResponseWriter, r *http.Request) {
 
 		resp := dto.CrackResponse{
 			RequestID:             task.ID,
-			EstimatedCombinations: est,
+			EstimatedCombinations: est.String(),
 		}
 
 		w.Header().Set("Content-Type", "application/json")

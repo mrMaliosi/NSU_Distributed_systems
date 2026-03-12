@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"CrackHash/internal/api/http/route"
 	"CrackHash/internal/handler"
@@ -39,11 +40,19 @@ func main() {
 		}
 	}
 
+	// Таймаут запросов к воркерам (в секундах), по умолчанию 10.
+	workerTimeoutSec := 10
+	if v := os.Getenv("WORKER_TIMEOUT_SECONDS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			workerTimeoutSec = parsed
+		}
+	}
+
 	if len(workerURLs) == 0 {
 		workerURLs = []string{"http://worker:57107"}
 	}
 
-	taskService := service.NewTaskService(repo, workerURLs)
+	taskService := service.NewTaskService(repo, workerURLs, time.Duration(workerTimeoutSec)*time.Second)
 	metricsHandler := handler.NewMetricsHandler(taskService)
 
 	route.RegisterManagerRoutes(taskService, metricsHandler)
