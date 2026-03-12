@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"CrackHash/internal/api/http/route"
 	"CrackHash/internal/service"
@@ -16,7 +17,16 @@ func main() {
 		managerURL = "http://manager:57107"
 	}
 
-	workerService := service.NewWorkerService(managerURL)
+	// Таймаут на HTTP запросы (например, отправка результата менеджеру) и на таймауты HTTP-сервера воркера.
+	workerTimeoutSec := 10
+	if v := os.Getenv("WORKER_TIMEOUT_SECONDS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			workerTimeoutSec = parsed
+		}
+	}
+	timeout := time.Duration(workerTimeoutSec) * time.Second
+
+	workerService := service.NewWorkerService(managerURL, timeout)
 	route.RegisterWorkerRoutes(workerService)
 
 	port := 57107
@@ -27,5 +37,13 @@ func main() {
 	}
 
 	log.Printf("Worker running on port %d\n", port)
-	log.Fatal(http.ListenAndServe(":"+strconv.Itoa(port), nil))
+	srv := &http.Server{
+		Addr:              ":" + strconv.Itoa(port),
+		Handler:           nil,
+		ReadHeaderTimeout: timeout,
+		ReadTimeout:       timeout,
+		WriteTimeout:      timeout,
+		IdleTimeout:       timeout,
+	}
+	log.Fatal(srv.ListenAndServe())
 }

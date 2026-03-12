@@ -58,19 +58,19 @@ docker compose up
 **1 воркер:**
 
 ```bash
-WORKERS_COUNT=1 docker-compose up --scale worker=1
+WORKERS_COUNT=1 docker compose up --scale worker=1
 ```
 
 **4 воркера:**
 
 ```bash
-WORKERS_COUNT=4 docker-compose up --scale worker=4
+WORKERS_COUNT=4 docker compose up --scale worker=4
 ```
 
 **8 воркеров:**
 
 ```bash
-WORKERS_COUNT=8 docker-compose up --scale worker=8
+WORKERS_COUNT=8 docker compose up --scale worker=8
 ```
 
 Во всех случаях менеджер общается с воркерами по HTTP‑адресу `http://worker:57107/...` (имя сервиса `worker` внутри сети docker-compose).

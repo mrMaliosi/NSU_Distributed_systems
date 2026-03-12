@@ -16,10 +16,13 @@ type WorkerService struct {
 	maxRetries int
 }
 
-func NewWorkerService(managerURL string) *WorkerService {
+func NewWorkerService(managerURL string, timeout time.Duration) *WorkerService {
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
 	return &WorkerService{
 		managerURL: managerURL,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		httpClient: &http.Client{Timeout: timeout},
 		maxRetries: 5,
 	}
 }

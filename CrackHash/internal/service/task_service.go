@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,6 +18,7 @@ import (
 	"CrackHash/internal/domain"
 	"CrackHash/internal/metrics"
 	"CrackHash/internal/repository"
+	"CrackHash/internal/scheduler"
 )
 
 type TaskService struct {
@@ -28,27 +28,10 @@ type TaskService struct {
 	timeout         time.Duration
 
 	mu         sync.Mutex
-	schedulers map[string]*taskScheduler
+	schedulers map[string]*scheduler.Scheduler
 }
 
 const maxWorkerRetriesPerPart = 5
-
-// taskScheduler реализует "синхронную" отправку: каждый воркер (endpoint) получает
-// максимум 1 подзадачу одновременно. Новые partNumber берём из атомарного счётчика,
-// а повторные — из очереди retryQueue.
-type taskScheduler struct {
-	taskID    string
-	partCount int
-
-	nextPart atomic.Int64
-
-	retryQueue chan int
-	retries    []atomic.Int32
-
-	// done[partNumber] == 1 если часть уже успешно зачтена (идемпотентность без map)
-	done      []atomic.Uint32
-	doneCount atomic.Int64
-}
 
 func NewTaskService(repo repository.TaskRepository, workerEndpoints []string, timeout time.Duration) *TaskService {
 	if timeout <= 0 {
@@ -60,7 +43,7 @@ func NewTaskService(repo repository.TaskRepository, workerEndpoints []string, ti
 		workerEndpoints: workerEndpoints,
 		httpClient:      &http.Client{Timeout: timeout},
 		timeout:         timeout,
-		schedulers:      make(map[string]*taskScheduler),
+		schedulers:      make(map[string]*scheduler.Scheduler),
 	}
 }
 
@@ -138,75 +121,35 @@ func (s *TaskService) startScheduler(task *domain.Task, partCount int) {
 		return
 	}
 
-	sch := &taskScheduler{
-		taskID:     task.ID,
-		partCount:  partCount,
-		retryQueue: make(chan int, partCount*2),
-		retries:    make([]atomic.Int32, partCount),
-		done:       make([]atomic.Uint32, partCount),
-	}
-	sch.nextPart.Store(0)
+	sch := scheduler.New(task.ID, partCount)
 
 	s.mu.Lock()
 	s.schedulers[task.ID] = sch
 	s.mu.Unlock()
 
-	// Один цикл на endpoint: на стороне воркера очереди нет (воркер держит busy=true),
-	// а менеджер не будет слать ему следующую подзадачу, пока предыдущая не "принята" (202).
-	for _, workerURL := range s.workerEndpoints {
-		workerURL := workerURL
-		go s.workerLoop(task, sch, workerURL)
-	}
-}
-
-func (s *TaskService) workerLoop(task *domain.Task, sch *taskScheduler, workerURL string) {
-	backoff := 100 * time.Millisecond
-
-	for {
-		// stop conditions
-		current, err := s.repo.GetByID(sch.taskID)
-		if err != nil {
-			return
-		}
-		if current.Status == domain.StatusCancelled || current.Status == domain.StatusReady || current.Status == domain.StatusError {
-			return
-		}
-		if sch.doneCount.Load() >= int64(sch.partCount) {
-			return
-		}
-
-		partNumber, ok := sch.nextPartNumber()
-		if !ok {
-			time.Sleep(50 * time.Millisecond)
-			continue
-		}
-
+	send := func(workerURL string, partNumber int) bool {
 		payload := dto.WorkerTaskRequest{
 			RequestId:  task.ID,
 			MaxLength:  task.MaxLength,
 			Hash:       task.Hash,
 			PartNumber: partNumber,
-			PartCount:  sch.partCount,
+			PartCount:  partCount,
 			Algorithm:  task.Algorithm,
 			Alphabet:   task.Alphabet,
 		}
-
-		accepted, _ := s.sendWorkerTask(workerURL, payload)
-		if accepted {
-			backoff = 100 * time.Millisecond
-			continue
-		}
-
-		// Busy/timeout/недоступен/не 202: возвращаем partNumber в очередь ретраев
-		sch.enqueueRetry(partNumber)
-		time.Sleep(backoff)
-		if backoff < time.Second {
-			backoff *= 2
-			if backoff > time.Second {
-				backoff = time.Second
-			}
-		}
+		ok, _ := s.sendWorkerTask(workerURL, payload)
+		return ok
 	}
+
+	shouldStop := func() bool {
+		current, err := s.repo.GetByID(task.ID)
+		if err != nil {
+			return true
+		}
+		return current.Status == domain.StatusCancelled || current.Status == domain.StatusReady || current.Status == domain.StatusError
+	}
+
+	sch.Start(s.workerEndpoints, send, shouldStop)
 }
 
 // sendWorkerTask отправляет одну часть задачи конкретному воркеру.
@@ -241,40 +184,6 @@ func (s *TaskService) sendWorkerTask(workerURL string, payload dto.WorkerTaskReq
 		return true, nil
 	}
 	return false, fmt.Errorf("worker returned status %d", resp.StatusCode)
-}
-
-func (sch *taskScheduler) enqueueRetry(partNumber int) {
-	if partNumber < 0 || partNumber >= sch.partCount {
-		return
-	}
-	if sch.done[partNumber].Load() == 1 {
-		return
-	}
-	select {
-	case sch.retryQueue <- partNumber:
-	default:
-	}
-}
-
-func (sch *taskScheduler) nextPartNumber() (int, bool) {
-	// Сначала ретраи
-	select {
-	case p := <-sch.retryQueue:
-		if p >= 0 && p < sch.partCount && sch.done[p].Load() == 0 {
-			return p, true
-		}
-	default:
-	}
-
-	// Затем новый partNumber
-	p := int(sch.nextPart.Add(1) - 1)
-	if p < 0 || p >= sch.partCount {
-		return 0, false
-	}
-	if sch.done[p].Load() == 1 {
-		return 0, false
-	}
-	return p, true
 }
 
 func (s *TaskService) GetStatus(id string) (*domain.Task, error) {
@@ -370,8 +279,8 @@ func (s *TaskService) AcceptWorkerResult(
 			return s.repo.Update(task)
 		}
 
-		tries := sch.retries[partNumber].Add(1)
-		if int(tries) > maxWorkerRetriesPerPart {
+		tries := sch.IncRetry(partNumber)
+		if tries > maxWorkerRetriesPerPart {
 			task.Status = domain.StatusError
 			task.Error = workerErr
 			now := time.Now()
@@ -380,17 +289,16 @@ func (s *TaskService) AcceptWorkerResult(
 		}
 
 		_ = s.repo.Update(task)
-		sch.enqueueRetry(partNumber)
+		sch.EnqueueRetry(partNumber)
 		return nil
 	}
 
 	// Идемпотентность по partNumber без map.
 	// Если из-за сетевых сбоев/таймаута пришёл дубль результата — второй раз не засчитываем.
-	if sch != nil && partNumber >= 0 && partNumber < sch.partCount {
-		if !sch.done[partNumber].CompareAndSwap(0, 1) {
+	if sch != nil {
+		if !sch.MarkDone(partNumber) {
 			return nil
 		}
-		sch.doneCount.Add(1)
 	}
 
 	// Добавляем найденные слова

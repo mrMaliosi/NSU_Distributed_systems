@@ -19,3 +19,5 @@ services:
       - ENV=production
       - MANAGER_URL=http://manager:57107
       - PORT=57107
+      # Таймаут на HTTP операции воркера (в секундах)
+      - WORKER_TIMEOUT_SECONDS=1
