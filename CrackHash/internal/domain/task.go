@@ -21,7 +21,7 @@ type Task struct {
 	FailedParts    []int
 
 	// Метрики по выполнению
-	CheckedWords   uint64 // сколько слов было проверено по задаче
+	CheckedWords    uint64 // сколько слов было проверено по задаче
 	TotalExecTimeMs uint64 // суммарное время работы воркеров по задаче (мс)
 
 	CreatedAt  time.Time

@@ -9,6 +9,8 @@ import (
 	"math/big"
 	"net/http"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,6 +26,28 @@ type TaskService struct {
 	workerEndpoints []string
 	httpClient      *http.Client
 	timeout         time.Duration
+
+	mu         sync.Mutex
+	schedulers map[string]*taskScheduler
+}
+
+const maxWorkerRetriesPerPart = 5
+
+// taskScheduler реализует "синхронную" отправку: каждый воркер (endpoint) получает
+// максимум 1 подзадачу одновременно. Новые partNumber берём из атомарного счётчика,
+// а повторные — из очереди retryQueue.
+type taskScheduler struct {
+	taskID    string
+	partCount int
+
+	nextPart atomic.Int64
+
+	retryQueue chan int
+	retries    []atomic.Int32
+
+	// done[partNumber] == 1 если часть уже успешно зачтена (идемпотентность без map)
+	done      []atomic.Uint32
+	doneCount atomic.Int64
 }
 
 func NewTaskService(repo repository.TaskRepository, workerEndpoints []string, timeout time.Duration) *TaskService {
@@ -36,6 +60,7 @@ func NewTaskService(repo repository.TaskRepository, workerEndpoints []string, ti
 		workerEndpoints: workerEndpoints,
 		httpClient:      &http.Client{Timeout: timeout},
 		timeout:         timeout,
+		schedulers:      make(map[string]*taskScheduler),
 	}
 }
 
@@ -103,58 +128,153 @@ func (s *TaskService) CreateTask(
 		return nil, big.NewInt(0), false, err
 	}
 	fmt.Println("Accepted task with partCount", partCount)
-	go s.dispatchTaskParts(task, int(partCount))
+	go s.startScheduler(task, int(partCount))
 
 	return task, estimated, false, nil
 }
 
-func (s *TaskService) dispatchTaskParts(task *domain.Task, partCount int) {
+func (s *TaskService) startScheduler(task *domain.Task, partCount int) {
 	if len(s.workerEndpoints) == 0 || partCount <= 0 {
 		return
 	}
 
-	for partNumber := 0; partNumber < partCount; partNumber++ {
-		workerURL := s.workerEndpoints[partNumber%len(s.workerEndpoints)]
+	sch := &taskScheduler{
+		taskID:     task.ID,
+		partCount:  partCount,
+		retryQueue: make(chan int, partCount*2),
+		retries:    make([]atomic.Int32, partCount),
+		done:       make([]atomic.Uint32, partCount),
+	}
+	sch.nextPart.Store(0)
+
+	s.mu.Lock()
+	s.schedulers[task.ID] = sch
+	s.mu.Unlock()
+
+	// Один цикл на endpoint: на стороне воркера очереди нет (воркер держит busy=true),
+	// а менеджер не будет слать ему следующую подзадачу, пока предыдущая не "принята" (202).
+	for _, workerURL := range s.workerEndpoints {
+		workerURL := workerURL
+		go s.workerLoop(task, sch, workerURL)
+	}
+}
+
+func (s *TaskService) workerLoop(task *domain.Task, sch *taskScheduler, workerURL string) {
+	backoff := 100 * time.Millisecond
+
+	for {
+		// stop conditions
+		current, err := s.repo.GetByID(sch.taskID)
+		if err != nil {
+			return
+		}
+		if current.Status == domain.StatusCancelled || current.Status == domain.StatusReady || current.Status == domain.StatusError {
+			return
+		}
+		if sch.doneCount.Load() >= int64(sch.partCount) {
+			return
+		}
+
+		partNumber, ok := sch.nextPartNumber()
+		if !ok {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
 
 		payload := dto.WorkerTaskRequest{
 			RequestId:  task.ID,
 			MaxLength:  task.MaxLength,
 			Hash:       task.Hash,
 			PartNumber: partNumber,
-			PartCount:  partCount,
+			PartCount:  sch.partCount,
 			Algorithm:  task.Algorithm,
 			Alphabet:   task.Alphabet,
 		}
 
-		go s.sendWorkerTask(workerURL, payload)
+		accepted, _ := s.sendWorkerTask(workerURL, payload)
+		if accepted {
+			backoff = 100 * time.Millisecond
+			continue
+		}
+
+		// Busy/timeout/недоступен/не 202: возвращаем partNumber в очередь ретраев
+		sch.enqueueRetry(partNumber)
+		time.Sleep(backoff)
+		if backoff < time.Second {
+			backoff *= 2
+			if backoff > time.Second {
+				backoff = time.Second
+			}
+		}
 	}
 }
 
 // sendWorkerTask отправляет одну часть задачи конкретному воркеру.
-func (s *TaskService) sendWorkerTask(workerURL string, payload dto.WorkerTaskRequest) {
+// Возвращает true только если воркер принял задачу (HTTP 202).
+func (s *TaskService) sendWorkerTask(workerURL string, payload dto.WorkerTaskRequest) (bool, error) {
 	if workerURL == "" {
-		return
+		return false, fmt.Errorf("empty worker url")
 	}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return
+		return false, err
 	}
 
 	url := workerURL + "/internal/api/worker/hash/crack/task"
 
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(body))
 	if err != nil {
-		return
+		return false, err
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return
+		return false, err
 	}
 	resp.Body.Close()
+
+	// 202 = Accepted (воркер взял работу). Всё остальное — считаем неуспехом.
+	if resp.StatusCode == http.StatusAccepted {
+		return true, nil
+	}
+	return false, fmt.Errorf("worker returned status %d", resp.StatusCode)
+}
+
+func (sch *taskScheduler) enqueueRetry(partNumber int) {
+	if partNumber < 0 || partNumber >= sch.partCount {
+		return
+	}
+	if sch.done[partNumber].Load() == 1 {
+		return
+	}
+	select {
+	case sch.retryQueue <- partNumber:
+	default:
+	}
+}
+
+func (sch *taskScheduler) nextPartNumber() (int, bool) {
+	// Сначала ретраи
+	select {
+	case p := <-sch.retryQueue:
+		if p >= 0 && p < sch.partCount && sch.done[p].Load() == 0 {
+			return p, true
+		}
+	default:
+	}
+
+	// Затем новый partNumber
+	p := int(sch.nextPart.Add(1) - 1)
+	if p < 0 || p >= sch.partCount {
+		return 0, false
+	}
+	if sch.done[p].Load() == 1 {
+		return 0, false
+	}
+	return p, true
 }
 
 func (s *TaskService) GetStatus(id string) (*domain.Task, error) {
@@ -233,14 +353,44 @@ func (s *TaskService) AcceptWorkerResult(
 		return nil
 	}
 
+	s.mu.Lock()
+	sch := s.schedulers[requestID]
+	s.mu.Unlock()
+
 	// Если воркер вернул ошибку
 	if workerErr != "" {
 		task.FailedParts = append(task.FailedParts, partNumber)
-		task.Status = domain.StatusError
-		task.Error = workerErr
-		now := time.Now()
-		task.FinishedAt = &now
-		return s.repo.Update(task)
+
+		// Повторно назначаем тот же partNumber: кладём в очередь ретраев.
+		if sch == nil || partNumber < 0 || partNumber >= int(task.TotalParts) {
+			task.Status = domain.StatusError
+			task.Error = workerErr
+			now := time.Now()
+			task.FinishedAt = &now
+			return s.repo.Update(task)
+		}
+
+		tries := sch.retries[partNumber].Add(1)
+		if int(tries) > maxWorkerRetriesPerPart {
+			task.Status = domain.StatusError
+			task.Error = workerErr
+			now := time.Now()
+			task.FinishedAt = &now
+			return s.repo.Update(task)
+		}
+
+		_ = s.repo.Update(task)
+		sch.enqueueRetry(partNumber)
+		return nil
+	}
+
+	// Идемпотентность по partNumber без map.
+	// Если из-за сетевых сбоев/таймаута пришёл дубль результата — второй раз не засчитываем.
+	if sch != nil && partNumber >= 0 && partNumber < sch.partCount {
+		if !sch.done[partNumber].CompareAndSwap(0, 1) {
+			return nil
+		}
+		sch.doneCount.Add(1)
 	}
 
 	// Добавляем найденные слова
@@ -251,6 +401,7 @@ func (s *TaskService) AcceptWorkerResult(
 	if execTime > 0 {
 		task.TotalExecTimeMs += uint64(execTime)
 	}
+
 	task.CompletedParts++
 	if task.CompletedParts >= task.TotalParts {
 		task.Status = domain.StatusReady
