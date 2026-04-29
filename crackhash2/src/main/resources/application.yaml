@@ -1,0 +1,27 @@
+spring:
+  application:
+    name: crackhash2
+  docker:
+    compose:
+      enabled: false
+  data:
+    mongodb:
+      uri: ${MONGODB_URI:mongodb://localhost:27017,localhost:27018,localhost:27019/crackhash2?replicaSet=rs0&w=majority&retryWrites=true}
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USERNAME:guest}
+    password: ${RABBITMQ_PASSWORD:guest}
+    listener:
+      simple:
+        auto-startup: ${RABBITMQ_LISTENER_AUTO_STARTUP:true}
+        acknowledge-mode: manual
+      direct:
+        auto-startup: ${RABBITMQ_LISTENER_AUTO_STARTUP:true}
+
+server:
+  port: ${SERVER_PORT:8081}
+
+app:
+  dispatch:
+    local-fallback: ${DISPATCH_LOCAL_FALLBACK:false}

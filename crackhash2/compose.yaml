@@ -1,0 +1,77 @@
+services:
+  mongodb1:
+    image: mongo:8.0
+    container_name: crackhash2-mongodb1
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--port", "27017"]
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo1_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  mongodb2:
+    image: mongo:8.0
+    container_name: crackhash2-mongodb2
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--port", "27017"]
+    ports:
+      - "27018:27017"
+    volumes:
+      - mongo2_data:/data/db
+
+  mongodb3:
+    image: mongo:8.0
+    container_name: crackhash2-mongodb3
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--port", "27017"]
+    ports:
+      - "27019:27017"
+    volumes:
+      - mongo3_data:/data/db
+
+  mongodb-rs-init:
+    image: mongo:8.0
+    container_name: crackhash2-mongodb-rs-init
+    depends_on:
+      mongodb1:
+        condition: service_healthy
+      mongodb2:
+        condition: service_started
+      mongodb3:
+        condition: service_started
+    restart: "no"
+    entrypoint:
+      - sh
+      - -c
+      - |
+        mongosh --host mongodb1:27017 --eval '
+          rs.initiate({
+            _id: "rs0",
+            members: [
+              { _id: 0, host: "mongodb1:27017", priority: 2 },
+              { _id: 1, host: "mongodb2:27017", priority: 1 },
+              { _id: 2, host: "mongodb3:27017", priority: 1 }
+            ]
+          });
+        ' || true;
+        mongosh --host mongodb1:27017 --eval 'rs.status().ok'
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: crackhash2-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+volumes:
+  mongo1_data:
+  mongo2_data:
+  mongo3_data:
+  rabbitmq_data:

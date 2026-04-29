@@ -1,0 +1,55 @@
+# Java
+*.class
+*.jar
+*.war
+*.ear
+*.nar
+*.jnilib
+*.so
+*.dll
+*.dylib
+*.swp
+*.swo
+*.bak
+*.tmp
+hs_err_pid*
+
+# Gradle
+.gradle
+build/
+**/build/
+.gradle/
+.gradle.totals
+!gradle-wrapper.jar
+!gradle/wrapper/gradle-wrapper.properties
+
+# IDE: IntelliJ
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+dist/
+
+# IDE: Eclipse (если нужен)
+.classpath
+.project
+.settings/
+
+# Maven (если есть, но не нужен)
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local properties
+local.properties

@@ -14,10 +14,18 @@ type Task struct {
 	Signature string // уникальная подпись задачи по её параметрам
 
 	// Статус и результаты
-	Status Status
-	Result []string
-	Error  string
+	Status         Status
+	Result         []string
+	TotalParts     uint64
+	CompletedParts uint64
+	FailedParts    []int
+
+	// Метрики по выполнению
+	CheckedWords    uint64 // сколько слов было проверено по задаче
+	TotalExecTimeMs uint64 // суммарное время работы воркеров по задаче (мс)
 
 	CreatedAt  time.Time
 	FinishedAt *time.Time
+
+	Error string
 }
