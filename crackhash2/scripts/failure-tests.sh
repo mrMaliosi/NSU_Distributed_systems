@@ -2,7 +2,9 @@
 
 set -euo pipefail
 
-COMPOSE_FILE="${COMPOSE_FILE:-compose.yaml}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+COMPOSE_FILE="${COMPOSE_FILE:-"$PROJECT_ROOT/compose.yaml"}"
 MANAGER_URL="${MANAGER_URL:-http://localhost:8081}"
 REQUEST_TIMEOUT_SEC="${REQUEST_TIMEOUT_SEC:-240}"
 NO_WORKER_WAIT_SEC="${NO_WORKER_WAIT_SEC:-12}"
