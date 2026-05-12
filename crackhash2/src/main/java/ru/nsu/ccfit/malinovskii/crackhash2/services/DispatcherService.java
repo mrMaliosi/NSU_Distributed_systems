@@ -41,7 +41,6 @@ public class DispatcherService {
      * Timeout lease задачи
      */
     private static final long TASK_TIMEOUT_MS = 30_000;
-
     private static final int MAX_ATTEMPTS = 5;
 
     @Value("${app.dispatch.local-fallback:true}")
@@ -67,11 +66,9 @@ public class DispatcherService {
      * Создание частей request
      */
     private void processNewRequests() {
-        List<HashRequest> requests =
-                requestRepository.findByStatus(RequestStatus.IN_PROGRESS);
+        List<HashRequest> requests = requestRepository.findByStatus(RequestStatus.IN_PROGRESS);
         for (HashRequest request : requests) {
-            long existing =
-                    taskPartRepository.countByRequestId(request.getId());
+            long existing = taskPartRepository.countByRequestId(request.getId());
             if (existing > 0) {
                 continue;
             }
@@ -89,11 +86,7 @@ public class DispatcherService {
         long chunk = Math.max(1, total / PARTS);
         long start = 0;
         for (int i = 0; i < PARTS && start < total; i++) {
-            long end =
-                    (i == PARTS - 1)
-                            ? total
-                            : Math.min(total, start + chunk);
-
+            long end = (i == PARTS - 1) ? total : Math.min(total, start + chunk);
             TaskPart part = new TaskPart();
             part.setId(UUID.randomUUID().toString());
             part.setRequestId(request.getId());
@@ -125,9 +118,7 @@ public class DispatcherService {
                     && now - part.getLastUpdated() < PENDING_RETRY_DELAY_MS) {
                 continue;
             }
-            HashRequest request =
-                    requestRepository.findById(part.getRequestId())
-                            .orElse(null);
+            HashRequest request = requestRepository.findById(part.getRequestId()).orElse(null);
             if (request == null) {
                 continue;
             }
@@ -153,8 +144,7 @@ public class DispatcherService {
                 );
         long now = now();
         for (TaskPart part : active) {
-            if (part.getStatus() == TaskStatus.DONE
-                    || part.getStatus() == TaskStatus.FAILED) {
+            if (part.getStatus() == TaskStatus.DONE || part.getStatus() == TaskStatus.FAILED) {
                 continue;
             }
             if (part.getLastUpdated() == null) {
@@ -342,10 +332,7 @@ public class DispatcherService {
     /**
      * Build MQ message
      */
-    private TaskMessage buildMessage(
-            TaskPart part,
-            HashRequest request
-    ) {
+    private TaskMessage buildMessage(TaskPart part, HashRequest request) {
         TaskMessage msg = new TaskMessage();
         msg.setTaskId(part.getId());
         msg.setRequestId(request.getId());
