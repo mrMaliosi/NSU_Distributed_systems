@@ -9,4 +9,5 @@ public class MetricsResponseDto {
     private long totalTasks;
     private long activeTasks;
     private long completedTasks;
+    private long avgExecutionTime;
 }

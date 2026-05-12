@@ -3,6 +3,7 @@ package ru.nsu.ccfit.malinovskii.crackhash2.api.controller;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Profile;
 import org.springframework.web.bind.annotation.*;
 import ru.nsu.ccfit.malinovskii.crackhash2.api.dto.request.CreateRequestDto;
 import ru.nsu.ccfit.malinovskii.crackhash2.api.dto.response.CreateResponseDto;
@@ -13,13 +14,11 @@ import ru.nsu.ccfit.malinovskii.crackhash2.persistence.entity.RequestStatus;
 import ru.nsu.ccfit.malinovskii.crackhash2.services.ManagerService;
 import ru.nsu.ccfit.malinovskii.crackhash2.utils.SplitterUtils;
 
-
-import java.util.List;
-
 @RestController
 @RequestMapping("/api")
 @RequiredArgsConstructor
 @Slf4j
+@Profile("manager")
 public class ManagerController {
 
     private final ManagerService managerService;
@@ -69,7 +68,8 @@ public class ManagerController {
         return new MetricsResponseDto(
                 m.totalTasks(),
                 m.activeTasks(),
-                m.completedTasks()
+                m.completedTasks(),
+                m.avgExecutionTime()
         );
     }
 

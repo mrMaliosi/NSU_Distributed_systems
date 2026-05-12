@@ -2,11 +2,13 @@ package ru.nsu.ccfit.malinovskii.crackhash2.services;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Profile;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import ru.nsu.ccfit.malinovskii.crackhash2.persistence.entity.HashRequest;
 import ru.nsu.ccfit.malinovskii.crackhash2.persistence.entity.RequestStatus;
 import ru.nsu.ccfit.malinovskii.crackhash2.persistence.repo.RequestRepository;
+import ru.nsu.ccfit.malinovskii.crackhash2.utils.SplitterUtils;
 
 import java.time.Instant;
 import java.util.Optional;
@@ -15,6 +17,7 @@ import java.util.UUID;
 @Service
 @Slf4j
 @RequiredArgsConstructor
+@Profile("manager")
 public class ManagerService {
 
     private final RequestRepository requestRepository;
@@ -35,9 +38,7 @@ public class ManagerService {
 
         if (existing.isPresent()) {
             HashRequest req = existing.get();
-
             log.info("Request already exists: id={}, status={}", req.getId(), req.getStatus());
-
             return req;
         }
 
@@ -48,10 +49,8 @@ public class ManagerService {
         request.setMaxLength(maxLength);
         request.setAlgorithm(algorithm);
         request.setAlphabet(alphabet);
-
         request.setStatus(RequestStatus.IN_PROGRESS);
         request.setResult(null);
-
         long now = Instant.now().toEpochMilli();
         request.setCreatedAt(now);
         request.setUpdatedAt(now);
@@ -113,10 +112,37 @@ public class ManagerService {
         long total = requestRepository.count();
         long completed = requestRepository.countByStatus(RequestStatus.READY);
         long active = requestRepository.countByStatus(RequestStatus.IN_PROGRESS);
+        long avgSpeed = calculateAvgSpeedWordsPerSec();
 
-        return new Metrics(total, active, completed);
+        return new Metrics(total, active, completed, avgSpeed);
+    }
+
+    private long calculateAvgSpeedWordsPerSec() {
+        var readyRequests = requestRepository.findByStatus(RequestStatus.READY);
+        long processed = 0;
+        long durationMillis = 0;
+
+        for (HashRequest request : readyRequests) {
+            if (request.getCreatedAt() == null || request.getUpdatedAt() == null) {
+                continue;
+            }
+
+            long requestDuration = request.getUpdatedAt() - request.getCreatedAt();
+            if (requestDuration <= 0) {
+                continue;
+            }
+
+            processed += SplitterUtils.estimate(request.getAlphabet().length(), request.getMaxLength());
+            durationMillis += requestDuration;
+        }
+
+        if (processed == 0 || durationMillis == 0) {
+            return 0;
+        }
+
+        return (processed * 1000L) / durationMillis;
     }
 
     // DTO для метрик (временно тут)
-    public record Metrics(long totalTasks, long activeTasks, long completedTasks) {}
+    public record Metrics(long totalTasks, long activeTasks, long completedTasks, long avgExecutionTime) {}
 }

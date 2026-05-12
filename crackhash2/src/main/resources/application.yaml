@@ -4,9 +4,9 @@ spring:
   docker:
     compose:
       enabled: false
-  data:
-    mongodb:
-      uri: ${MONGODB_URI:mongodb://localhost:27017,localhost:27018,localhost:27019/crackhash2?replicaSet=rs0&w=majority&retryWrites=true}
+  # Spring Boot 4: Mongo client properties moved from spring.data.mongodb.* to spring.mongodb.*
+  mongodb:
+    uri: ${MONGODB_URI:mongodb://localhost:27017,localhost:27018,localhost:27019/crackhash2?replicaSet=rs0&w=majority&retryWrites=true&readPreference=primary}
   rabbitmq:
     host: ${RABBITMQ_HOST:localhost}
     port: ${RABBITMQ_PORT:5672}
@@ -18,6 +18,12 @@ spring:
         acknowledge-mode: manual
       direct:
         auto-startup: ${RABBITMQ_LISTENER_AUTO_STARTUP:true}
+  profiles:
+    group:
+      compose-local:
+        - manager
+        - dispatcher
+        - worker
 
 server:
   port: ${SERVER_PORT:8081}

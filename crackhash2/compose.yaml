@@ -1,12 +1,17 @@
+# Масштаб воркеров: docker compose up --build --scale worker=4
+# или переменная не используется напрямую в Compose v3; используйте --scale
+
 services:
   mongodb1:
     image: mongo:8.0
-    container_name: crackhash2-mongodb1
+    hostname: mongodb1
     command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--port", "27017"]
     ports:
       - "27017:27017"
     volumes:
       - mongo1_data:/data/db
+    networks:
+      - crackhash-net
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
       interval: 10s
@@ -15,25 +20,28 @@ services:
 
   mongodb2:
     image: mongo:8.0
-    container_name: crackhash2-mongodb2
+    hostname: mongodb2
     command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--port", "27017"]
     ports:
       - "27018:27017"
     volumes:
       - mongo2_data:/data/db
+    networks:
+      - crackhash-net
 
   mongodb3:
     image: mongo:8.0
-    container_name: crackhash2-mongodb3
+    hostname: mongodb3
     command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--port", "27017"]
     ports:
       - "27019:27017"
     volumes:
       - mongo3_data:/data/db
+    networks:
+      - crackhash-net
 
   mongodb-rs-init:
     image: mongo:8.0
-    container_name: crackhash2-mongodb-rs-init
     depends_on:
       mongodb1:
         condition: service_healthy
@@ -41,6 +49,8 @@ services:
         condition: service_started
       mongodb3:
         condition: service_started
+    networks:
+      - crackhash-net
     restart: "no"
     entrypoint:
       - sh
@@ -60,7 +70,7 @@ services:
 
   rabbitmq:
     image: rabbitmq:3-management
-    container_name: crackhash2-rabbitmq
+    hostname: rabbitmq
     ports:
       - "5672:5672"
       - "15672:15672"
@@ -69,6 +79,67 @@ services:
       RABBITMQ_DEFAULT_PASS: guest
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - crackhash-net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+
+  manager:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: crackhash2-app:latest
+    hostname: manager
+    ports:
+      - "${MANAGER_PORT:-8081}:8081"
+    environment:
+      SPRING_PROFILES_ACTIVE: manager
+      MONGODB_URI: mongodb://mongodb1:27017,mongodb2:27017,mongodb3:27017/crackhash2?replicaSet=rs0&w=majority&retryWrites=true
+      SERVER_PORT: "8081"
+    depends_on:
+      mongodb-rs-init:
+        condition: service_completed_successfully
+    networks:
+      - crackhash-net
+
+  dispatcher:
+    image: crackhash2-app:latest
+    hostname: dispatcher
+    environment:
+      SPRING_PROFILES_ACTIVE: dispatcher
+      SPRING_MAIN_WEBAPPLICATIONTYPE: none
+      MONGODB_URI: mongodb://mongodb1:27017,mongodb2:27017,mongodb3:27017/crackhash2?replicaSet=rs0&w=majority&retryWrites=true
+      RABBITMQ_HOST: rabbitmq
+      DISPATCH_LOCAL_FALLBACK: "false"
+    depends_on:
+      mongodb-rs-init:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - crackhash-net
+
+  worker:
+    image: crackhash2-app:latest
+    environment:
+      SPRING_PROFILES_ACTIVE: worker
+      SPRING_MAIN_WEBAPPLICATIONTYPE: none
+      MONGODB_URI: mongodb://mongodb1:27017,mongodb2:27017,mongodb3:27017/crackhash2?replicaSet=rs0&w=majority&retryWrites=true
+      RABBITMQ_HOST: rabbitmq
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      mongodb-rs-init:
+        condition: service_completed_successfully
+    networks:
+      - crackhash-net
+
+networks:
+  crackhash-net:
+    driver: bridge
 
 volumes:
   mongo1_data:

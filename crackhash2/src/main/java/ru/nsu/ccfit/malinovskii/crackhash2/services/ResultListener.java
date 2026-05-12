@@ -2,6 +2,7 @@ package ru.nsu.ccfit.malinovskii.crackhash2.services;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 import ru.nsu.ccfit.malinovskii.crackhash2.config.RabbitConfig;
 import ru.nsu.ccfit.malinovskii.crackhash2.persistence.entity.ResultMessage;
@@ -18,6 +19,7 @@ import java.time.Instant;
 @Component
 @RequiredArgsConstructor
 @Slf4j
+@Profile("dispatcher")
 public class ResultListener {
 
     private final TaskPartRepository taskPartRepository;

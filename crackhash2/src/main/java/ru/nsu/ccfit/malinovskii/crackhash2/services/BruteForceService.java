@@ -1,6 +1,7 @@
 package ru.nsu.ccfit.malinovskii.crackhash2.services;
 
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
 import ru.nsu.ccfit.malinovskii.crackhash2.persistence.entity.TaskMessage;
 
@@ -8,6 +9,7 @@ import java.security.MessageDigest;
 
 @Service
 @Slf4j
+@Profile({"dispatcher", "worker"})
 public class BruteForceService {
 
     public String crack(TaskMessage task) {

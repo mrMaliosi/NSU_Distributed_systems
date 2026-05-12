@@ -54,3 +54,25 @@ curl -X DELETE "http://localhost:8081/api/hash/crack?requestId=<REQUEST_ID>"
 ```bash
 curl http://localhost:8081/api/metrics
 ```
+
+## Автотесты отказоустойчивости
+
+Скрипт покрывает 6 сценариев:
+- стоп сервиса `manager`;
+- стоп `dispatcher`;
+- стоп primary-ноды MongoDB replica set;
+- стоп `rabbitmq`;
+- стоп одного `worker` во время обработки;
+- отсутствие `worker` в момент создания задания.
+
+Запуск:
+
+```bash
+./scripts/failure-tests.sh
+```
+
+Скрипт сам:
+- поднимает инфраструктуру (`docker compose up -d --build --scale worker=2`);
+- прогоняет все кейсы последовательно;
+- делает проверки через HTTP API менеджера;
+- в конце печатает `PASS/FAIL` и очищает окружение (`docker compose down -v`).

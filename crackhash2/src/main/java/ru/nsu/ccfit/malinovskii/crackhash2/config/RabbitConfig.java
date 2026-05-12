@@ -5,8 +5,10 @@ import org.springframework.amqp.support.converter.JacksonJsonMessageConverter;
 import org.springframework.amqp.support.converter.MessageConverter;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Profile;
 
 @Configuration
+@Profile({"dispatcher", "worker"})
 public class RabbitConfig {
 
     public static final String TASK_QUEUE = "task.queue";

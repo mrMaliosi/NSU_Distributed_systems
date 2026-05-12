@@ -1,0 +1,5 @@
+# HTTP API + MongoDB (без RabbitMQ)
+spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.amqp.RabbitAutoConfiguration
