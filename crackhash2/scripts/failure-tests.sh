@@ -126,10 +126,10 @@ create_heavy_request() {
   post_request "$random_hash" 6 "abcdefghijklmnopqrstuvwxyz0123456789"
 }
 
-create_worker_recovery_request() {
-  local target_hash
-  target_hash=$(python3 -c 'import hashlib; print(hashlib.md5("ffffff".encode()).hexdigest())')
-  post_request "$target_hash" 6 "abcdef"
+create_fast_unique_request() {
+  local random_hash
+  random_hash=$(python3 -c 'import uuid; print(uuid.uuid4().hex)')
+  post_request "$random_hash" 4 "abcdefghijklmnopqrstuvwxyz0123456789"
 }
 
 create_no_worker_request() {
@@ -138,8 +138,53 @@ create_no_worker_request() {
   post_request "$random_hash" 5 "abcdef"
 }
 
+test_worker_stop_during_processing() {
+  log "CASE 1: Stop worker during processing"
+  local req_json req_id wid status_mid
+  compose up -d --scale worker=1 >/dev/null
+  sleep 2
+
+  req_json=$(create_fast_unique_request)
+  req_id=$(printf '%s' "$req_json" | json_get requestId)
+  sleep 2
+
+  wid=$(worker_container_id)
+  [[ -n "$wid" ]] || fail "No worker container found"
+  docker stop "$wid" >/dev/null
+  sleep 3
+
+  status_mid=$(get_status "$req_id")
+  [[ "$status_mid" == "IN_PROGRESS" ]] || fail "Expected IN_PROGRESS after worker stop, got: $status_mid"
+
+  compose up -d --scale worker=1 >/dev/null
+  sleep 5
+
+  echo "status_mid: $status_mid"
+  echo "req_id: $req_id"
+
+  wait_status "$req_id" "READY" "$REQUEST_TIMEOUT_SEC"
+  pass "Request completed despite worker failure ($req_id)"
+}
+
+test_no_workers_at_creation() {
+  log "CASE 2: No workers at task creation"
+  compose up -d --scale worker=0 >/dev/null
+
+  local req_json req_id status_before
+  req_json=$(create_no_worker_request)
+  req_id=$(printf '%s' "$req_json" | json_get requestId)
+  sleep "$NO_WORKER_WAIT_SEC"
+
+  status_before=$(get_status "$req_id")
+  [[ "$status_before" == "IN_PROGRESS" ]] || fail "Expected IN_PROGRESS without workers, got: $status_before"
+
+  compose up -d --scale worker=2 >/dev/null
+  wait_status "$req_id" "READY" "$REQUEST_TIMEOUT_SEC"
+  pass "Request waits without workers and completes after scale-up ($req_id)"
+}
+
 test_manager_stop() {
-  log "CASE 1: Stop manager service"
+  log "CASE 3: Stop manager service"
   local req_json req_id
   req_json=$(create_heavy_request)
   req_id=$(printf '%s' "$req_json" | json_get requestId)
@@ -157,7 +202,7 @@ test_manager_stop() {
 }
 
 test_dispatcher_stop() {
-  log "CASE 2: Stop task dispatcher"
+  log "CASE 4: Stop task dispatcher"
   local req_json req_id status_before status_after
   req_json=$(create_heavy_request)
   req_id=$(printf '%s' "$req_json" | json_get requestId)
@@ -188,7 +233,7 @@ discover_primary_service() {
 }
 
 test_mongo_primary_stop() {
-  log "CASE 3: Stop MongoDB PRIMARY node"
+  log "CASE 5: Stop MongoDB PRIMARY node"
   local primary req_json req_id
   primary=$(discover_primary_service)
   log "Current PRIMARY: $primary"
@@ -205,7 +250,7 @@ test_mongo_primary_stop() {
 }
 
 test_rabbitmq_stop() {
-  log "CASE 4: Stop RabbitMQ"
+  log "CASE 6: Stop RabbitMQ"
   local req_json req_id status_during status_after
   req_json=$(create_heavy_request)
   req_id=$(printf '%s' "$req_json" | json_get requestId)
@@ -226,55 +271,14 @@ worker_container_id() {
   compose ps -q worker | python3 -c 'import sys; lines=[x.strip() for x in sys.stdin if x.strip()]; print(lines[0] if lines else "")'
 }
 
-test_worker_stop_during_processing() {
-  log "CASE 5: Stop worker during processing"
-  local req_json req_id wid status_mid
-  compose up -d --scale worker=1 >/dev/null
-  sleep 2
-
-  req_json=$(create_worker_recovery_request)
-  req_id=$(printf '%s' "$req_json" | json_get requestId)
-  sleep 1
-
-  wid=$(worker_container_id)
-  [[ -n "$wid" ]] || fail "No worker container found"
-  docker stop "$wid" >/dev/null
-  sleep 3
-
-  status_mid=$(get_status "$req_id")
-  [[ "$status_mid" == "IN_PROGRESS" ]] || fail "Expected IN_PROGRESS after worker stop, got: $status_mid"
-
-  compose up -d --scale worker=1 >/dev/null
-
-  wait_status "$req_id" "READY" "$REQUEST_TIMEOUT_SEC"
-  pass "Request completed despite worker failure ($req_id)"
-}
-
-test_no_workers_at_creation() {
-  log "CASE 6: No workers at task creation"
-  compose up -d --scale worker=0 >/dev/null
-
-  local req_json req_id status_before
-  req_json=$(create_no_worker_request)
-  req_id=$(printf '%s' "$req_json" | json_get requestId)
-  sleep "$NO_WORKER_WAIT_SEC"
-
-  status_before=$(get_status "$req_id")
-  [[ "$status_before" == "IN_PROGRESS" ]] || fail "Expected IN_PROGRESS without workers, got: $status_before"
-
-  compose up -d --scale worker=2 >/dev/null
-  wait_status "$req_id" "READY" "$REQUEST_TIMEOUT_SEC"
-  pass "Request waits without workers and completes after scale-up ($req_id)"
-}
-
 main() {
   prepare_env
+  test_worker_stop_during_processing
+  test_no_workers_at_creation
   test_manager_stop
   test_dispatcher_stop
   test_mongo_primary_stop
   test_rabbitmq_stop
-  test_worker_stop_during_processing
-  test_no_workers_at_creation
 
   log "All done: PASS=$PASS_COUNT FAIL=$FAIL_COUNT"
   compose_cleanup
