@@ -2,11 +2,13 @@ package ru.nsu.ccfit.malinovskii.crackhash2.services;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.amqp.core.MessageDeliveryMode;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Profile;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import ru.nsu.ccfit.malinovskii.crackhash2.config.RabbitConfig;
 import ru.nsu.ccfit.malinovskii.crackhash2.persistence.entity.*;
 import ru.nsu.ccfit.malinovskii.crackhash2.persistence.repo.RequestRepository;
@@ -21,15 +23,27 @@ import java.util.UUID;
 @Slf4j
 @Profile("dispatcher")
 public class DispatcherService {
+
     private final RabbitTemplate rabbitTemplate;
     private final BruteForceService bruteForceService;
 
     private final RequestRepository requestRepository;
     private final TaskPartRepository taskPartRepository;
 
-    private static final int PARTS = 10; // пока фикс, потом сделаем динамику
+    private static final int PARTS = 10;
+
+    /**
+     * Сколько ждём перед повторной отправкой QUEUED_PENDING
+     */
     private static final long PENDING_RETRY_DELAY_MS = 15_000;
+
+    /**
+     * Timeout lease задачи
+     */
+    private static final long TASK_TIMEOUT_MS = 30_000;
+
     private static final int MAX_ATTEMPTS = 5;
+
     @Value("${app.dispatch.local-fallback:true}")
     private boolean localFallbackEnabled;
 
@@ -38,170 +52,300 @@ public class DispatcherService {
      */
     @Scheduled(fixedDelay = 2000)
     public void dispatchLoop() {
-        processNewRequests();
-        dispatchTasks();
-        retryStuckTasks();
-        checkCompletion();
+
+        try {
+            processNewRequests();
+            dispatchTasks();
+            retryExpiredTasks();
+            checkCompletion();
+        } catch (Exception e) {
+            log.error("Dispatcher loop failed", e);
+        }
     }
 
     /**
-     * 1. Создание TaskParts
+     * Создание частей request
      */
     private void processNewRequests() {
-        List<HashRequest> requests = requestRepository.findByStatus(RequestStatus.IN_PROGRESS);
-
+        List<HashRequest> requests =
+                requestRepository.findByStatus(RequestStatus.IN_PROGRESS);
         for (HashRequest request : requests) {
-
-            long existingParts = taskPartRepository.countByRequestId(request.getId());
-
-            if (existingParts > 0) continue;
-
-            log.info("Splitting request {}", request.getId());
-
+            long existing =
+                    taskPartRepository.countByRequestId(request.getId());
+            if (existing > 0) {
+                continue;
+            }
+            log.info("Creating task parts for request {}", request.getId());
             createParts(request);
         }
     }
 
-    private void createParts(HashRequest request) {
-
+    /**
+     * Корректное деление диапазона
+     */
+    @Transactional
+    protected void createParts(HashRequest request) {
         long total = estimateTotal(request);
-        long chunk = total / PARTS;
+        long chunk = Math.max(1, total / PARTS);
+        long start = 0;
+        for (int i = 0; i < PARTS && start < total; i++) {
+            long end =
+                    (i == PARTS - 1)
+                            ? total
+                            : Math.min(total, start + chunk);
 
-        for (int i = 0; i < PARTS; i++) {
             TaskPart part = new TaskPart();
-
             part.setId(UUID.randomUUID().toString());
             part.setRequestId(request.getId());
-
-            part.setRangeStart(i * chunk);
-            part.setRangeEnd((i + 1) * chunk);
-
+            part.setRangeStart(start);
+            part.setRangeEnd(end);
             part.setStatus(TaskStatus.NEW);
             part.setAttempt(0);
-            part.setLastUpdated(Instant.now().toEpochMilli());
+            part.setLastUpdated(now());
+            taskPartRepository.save(part);
+            start = end;
+        }
+    }
 
+    /**
+     * Отправка новых задач
+     */
+    private void dispatchTasks() {
+        List<TaskPart> tasks =
+                taskPartRepository.findByStatusIn(
+                        List.of(
+                                TaskStatus.NEW,
+                                TaskStatus.QUEUED_PENDING
+                        )
+                );
+        long now = now();
+        for (TaskPart part : tasks) {
+            if (part.getStatus() == TaskStatus.QUEUED_PENDING
+                    && part.getLastUpdated() != null
+                    && now - part.getLastUpdated() < PENDING_RETRY_DELAY_MS) {
+                continue;
+            }
+            HashRequest request =
+                    requestRepository.findById(part.getRequestId())
+                            .orElse(null);
+            if (request == null) {
+                continue;
+            }
+            if (request.getStatus() != RequestStatus.IN_PROGRESS) {
+                continue;
+            }
+            sendToQueue(part, request);
+        }
+    }
+
+    /**
+     * Retry зависших задач
+     *
+     * QUEUED и IN_PROGRESS считаются lease-based состояниями.
+     */
+    private void retryExpiredTasks() {
+        List<TaskPart> active =
+                taskPartRepository.findByStatusIn(
+                        List.of(
+                                TaskStatus.QUEUED,
+                                TaskStatus.IN_PROGRESS
+                        )
+                );
+        long now = now();
+        for (TaskPart part : active) {
+            if (part.getStatus() == TaskStatus.DONE
+                    || part.getStatus() == TaskStatus.FAILED) {
+                continue;
+            }
+            if (part.getLastUpdated() == null) {
+                continue;
+            }
+            long age = now - part.getLastUpdated();
+            if (age < TASK_TIMEOUT_MS) {
+                continue;
+            }
+            int nextAttempt = part.getAttempt() + 1;
+            log.warn(
+                    "Task {} expired (status={}), retry attempt {}",
+                    part.getId(),
+                    part.getStatus(),
+                    nextAttempt
+            );
+            part.setAttempt(nextAttempt);
+            if (nextAttempt >= MAX_ATTEMPTS) {
+                part.setStatus(TaskStatus.FAILED);
+                log.error(
+                        "Task {} exceeded max attempts",
+                        part.getId()
+                );
+            } else {
+                part.setStatus(TaskStatus.NEW);
+            }
+            part.setLastUpdated(now);
             taskPartRepository.save(part);
         }
     }
 
     /**
-     * 2. Retry зависших задач
+     * Проверка завершения request
      */
-    private void retryStuckTasks() {
+    private void checkCompletion() {
+        List<HashRequest> requests =
+                requestRepository.findByStatus(RequestStatus.IN_PROGRESS);
+        for (HashRequest request : requests) {
+            List<TaskPart> parts =
+                    taskPartRepository.findByRequestId(request.getId());
 
-        List<TaskPart> stuck = taskPartRepository.findByStatus(TaskStatus.IN_PROGRESS);
+            if (parts.isEmpty()) {
+                continue;
+            }
+            long total = parts.size();
+            long done =
+                    parts.stream()
+                            .filter(p -> p.getStatus() == TaskStatus.DONE)
+                            .count();
+            long failed =
+                    parts.stream()
+                            .filter(p -> p.getStatus() == TaskStatus.FAILED)
+                            .count();
 
-        long now = Instant.now().toEpochMilli();
+            if (failed > 0) {
+                log.error(
+                        "Request {} failed",
+                        request.getId()
+                );
+                request.setStatus(RequestStatus.ERROR);
+                request.setUpdatedAt(now());
+                requestRepository.save(request);
+                continue;
+            }
 
-        for (TaskPart part : stuck) {
-            if (now - part.getLastUpdated() > 10000) { // 10 секунд
-
-                log.warn("Retrying task {}", part.getId());
-                int nextAttempt = part.getAttempt() + 1;
-                part.setAttempt(nextAttempt);
-                if (nextAttempt >= MAX_ATTEMPTS) {
-                    part.setStatus(TaskStatus.FAILED);
-                    log.error("Task {} exceeded max attempts", part.getId());
-                } else {
-                    part.setStatus(TaskStatus.NEW);
-                }
-                part.setLastUpdated(now);
-
-                taskPartRepository.save(part);
+            if (done == total) {
+                List<String> results =
+                        parts.stream()
+                                .map(TaskPart::getResult)
+                                .filter(r -> r != null && !r.isBlank())
+                                .distinct()
+                                .toList();
+                log.info(
+                        "Request {} completed",
+                        request.getId()
+                );
+                request.setStatus(RequestStatus.READY);
+                request.setResult(results);
+                request.setUpdatedAt(now());
+                requestRepository.save(request);
             }
         }
     }
 
     /**
-     * 3. Завершение request
+     * Отправка в RabbitMQ
      */
-    private void checkCompletion() {
-
-        List<HashRequest> requests = requestRepository.findByStatus(RequestStatus.IN_PROGRESS);
-
-        for (HashRequest request : requests) {
-
-            long total = taskPartRepository.findByRequestId(request.getId()).size();
-            long done = taskPartRepository.countByRequestIdAndStatus(
-                    request.getId(), TaskStatus.DONE
-            );
-            long failed = taskPartRepository.countByRequestIdAndStatus(
-                    request.getId(), TaskStatus.FAILED
-            );
-
-            if (total > 0 && total == done) {
-
-                log.info("HashRequest completed {}", request.getId());
-                List<String> results = taskPartRepository.findByRequestId(request.getId()).stream()
-                        .map(TaskPart::getResult)
-                        .filter(r -> r != null && !r.isBlank())
-                        .distinct()
-                        .toList();
-
-                request.setStatus(RequestStatus.READY);
-                request.setResult(results);
-                request.setUpdatedAt(Instant.now().toEpochMilli());
-
-                requestRepository.save(request);
-                continue;
-            }
-
-            if (failed > 0) {
-                request.setStatus(RequestStatus.ERROR);
-                request.setUpdatedAt(Instant.now().toEpochMilli());
-                requestRepository.save(request);
-            }
+    private void sendToQueue(
+            TaskPart part,
+            HashRequest request
+    ) {
+        if (part.getStatus() == TaskStatus.DONE
+                || part.getStatus() == TaskStatus.FAILED) {
+            return;
         }
-    }
-
-    private long estimateTotal(HashRequest request) {
-        int alphabet = request.getAlphabet().length();
-        int max = request.getMaxLength();
-
-        long total = 0;
-        for (int i = 1; i <= max; i++) {
-            total += Math.pow(alphabet, i);
-        }
-
-        return total;
-    }
-
-    private void sendToQueue(TaskPart part, HashRequest request) {
         TaskMessage msg = buildMessage(part, request);
         try {
+            /**
+             * Сначала помечаем как QUEUED,
+             * потом отправляем.
+             */
+            part.setStatus(TaskStatus.QUEUED);
+            part.setLastUpdated(now());
+            taskPartRepository.save(part);
             rabbitTemplate.convertAndSend(
                     RabbitConfig.EXCHANGE,
                     "task",
                     msg,
                     message -> {
-                        message.getMessageProperties().setDeliveryMode(org.springframework.amqp.core.MessageDeliveryMode.PERSISTENT);
+                        message.getMessageProperties()
+                                .setDeliveryMode(
+                                        MessageDeliveryMode.PERSISTENT
+                                );
                         return message;
                     }
             );
-
-            if (part.getStatus() == TaskStatus.QUEUED_PENDING) {
-                log.info("RabbitMQ recovered, task {} sent", part.getId());
-            }
-            part.setStatus(TaskStatus.QUEUED);
-
+            log.info(
+                    "Task {} sent to RabbitMQ",
+                    part.getId()
+            );
         } catch (Exception e) {
-            if (part.getStatus() != TaskStatus.QUEUED_PENDING) {
-                log.error("Failed to publish task {} to RabbitMQ; task queued pending", part.getId(), e);
-            }
+            log.error(
+                    "Failed to publish task {}",
+                    part.getId(),
+                    e
+            );
 
             if (localFallbackEnabled) {
                 processTaskLocally(part, msg);
                 return;
-            } else {
-                part.setStatus(TaskStatus.QUEUED_PENDING);
             }
-        }
 
-        part.setLastUpdated(System.currentTimeMillis());
-        taskPartRepository.save(part);
+            part.setStatus(TaskStatus.QUEUED_PENDING);
+            part.setLastUpdated(now());
+            taskPartRepository.save(part);
+        }
     }
 
-    private TaskMessage buildMessage(TaskPart part, HashRequest request) {
+    /**
+     * Local fallback execution
+     */
+    private void processTaskLocally(
+            TaskPart part,
+            TaskMessage msg
+    ) {
+        try {
+            part.setStatus(TaskStatus.IN_PROGRESS);
+            part.setLastUpdated(now());
+            taskPartRepository.save(part);
+            String result = bruteForceService.crack(msg);
+            /**
+             * IMPORTANT:
+             * не перезаписываем FAILED
+             */
+            TaskPart current =
+                    taskPartRepository.findById(part.getId())
+                            .orElseThrow();
+            if (current.getStatus() == TaskStatus.FAILED) {
+                log.warn(
+                        "Task {} already failed, ignoring local result",
+                        part.getId()
+                );
+                return;
+            }
+            current.setResult(result);
+            current.setStatus(TaskStatus.DONE);
+            current.setLastUpdated(now());
+            taskPartRepository.save(current);
+            log.info(
+                    "Task {} processed locally",
+                    part.getId()
+            );
+        } catch (Exception e) {
+            log.error(
+                    "Local execution failed for task {}",
+                    part.getId(),
+                    e
+            );
+            part.setStatus(TaskStatus.QUEUED_PENDING);
+            part.setLastUpdated(now());
+            taskPartRepository.save(part);
+        }
+    }
+
+    /**
+     * Build MQ message
+     */
+    private TaskMessage buildMessage(
+            TaskPart part,
+            HashRequest request
+    ) {
         TaskMessage msg = new TaskMessage();
         msg.setTaskId(part.getId());
         msg.setRequestId(request.getId());
@@ -214,39 +358,21 @@ public class DispatcherService {
         return msg;
     }
 
-    private void processTaskLocally(TaskPart part, TaskMessage msg) {
-        try {
-            String result = bruteForceService.crack(msg);
-            part.setResult(result);
-            part.setStatus(TaskStatus.DONE);
-            part.setLastUpdated(System.currentTimeMillis());
-            taskPartRepository.save(part);
-            log.info("Task {} processed locally", part.getId());
-        } catch (Exception localEx) {
-            part.setStatus(TaskStatus.QUEUED_PENDING);
-            part.setLastUpdated(System.currentTimeMillis());
-            taskPartRepository.save(part);
-            log.error("Local fallback failed for task {}", part.getId(), localEx);
+    /**
+     * Оценка total search space
+     */
+    private long estimateTotal(HashRequest request) {
+        int alphabet = request.getAlphabet().length();
+        int max = request.getMaxLength();
+        long total = 0;
+        for (int i = 1; i <= max; i++) {
+            total += (long) Math.pow(alphabet, i);
         }
+
+        return total;
     }
 
-    private void dispatchTasks() {
-        List<TaskPart> newTasks = taskPartRepository.findByStatusIn(
-                List.of(TaskStatus.NEW, TaskStatus.QUEUED_PENDING)
-        );
-        long now = System.currentTimeMillis();
-
-        for (TaskPart part : newTasks) {
-            if (part.getStatus() == TaskStatus.QUEUED_PENDING
-                    && part.getLastUpdated() != null
-                    && now - part.getLastUpdated() < PENDING_RETRY_DELAY_MS) {
-                continue;
-            }
-            HashRequest request = requestRepository.findById(part.getRequestId()).orElseThrow();
-            if (request.getStatus() != RequestStatus.IN_PROGRESS) {
-                continue;
-            }
-            sendToQueue(part, request);
-        }
+    private long now() {
+        return Instant.now().toEpochMilli();
     }
 }
